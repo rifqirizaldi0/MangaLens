@@ -4,6 +4,7 @@ import app.mangalens.ocr.BubbleKind
 import app.mangalens.settings.AppSettings
 import app.mangalens.settings.EngineKind
 import app.mangalens.settings.SourceLang
+import app.mangalens.settings.TargetLang
 
 interface TranslationEngine {
     /** Short name shown in the status pill, e.g. "Claude" or "Google". */
@@ -49,17 +50,22 @@ class TranslationService(
         onProgress: (suspend (Map<Int, String>) -> Unit)? = null,
     ): Outcome {
         val chain: List<TranslationEngine> = when {
-            forceGoogle -> listOf(google)
-            settings.engine == EngineKind.LLM -> listOf(LlmEngine(settings, glossary, cast), google)
-            settings.engine == EngineKind.GOOGLE -> listOf(google)
+            forceGoogle -> listOf(google, mlkit)
+            settings.engine == EngineKind.LLM -> listOf(LlmEngine(settings, glossary, cast), google, mlkit)
+            settings.engine == EngineKind.GOOGLE -> listOf(google, mlkit)
             else -> listOf(mlkit, google)
         }
         var lastError: Exception? = null
+        val targetLang = settings.targetLang
+        // Include target lang in the cache key so EN and ID results never collide.
+        val cacheKey: (TranslationEngine, String) -> String = { eng, text ->
+            TranslationCache.key(eng.cacheNamespace + ":" + targetLang.name, lang.name, text)
+        }
         for (engine in chain) {
             val resolved = arrayOfNulls<String>(items.size)
             val missingIdx = LinkedHashSet<Int>()
             for ((i, t) in items.withIndex()) {
-                val hit = cache.get(TranslationCache.key(engine.cacheNamespace, lang.name, t))
+                val hit = cache.get(cacheKey(engine, t))
                 if (hit != null) resolved[i] = hit else missingIdx.add(i)
             }
             // A sentence split across balloons only translates correctly as a
@@ -96,6 +102,10 @@ class TranslationService(
                             }
                         },
                     )
+                } else if (engine is GoogleFreeEngine) {
+                    engine.translate(missing.map { it.second }, lang, targetLang)
+                } else if (engine is MlKitEngine) {
+                    engine.translate(missing.map { it.second }, lang, targetLang)
                 } else {
                     engine.translate(missing.map { it.second }, lang)
                 }
@@ -104,7 +114,7 @@ class TranslationService(
                     val translated = fresh.getOrNull(k).orEmpty()
                     if (translated.isNotBlank()) {
                         resolved[idx] = translated
-                        cache.put(TranslationCache.key(engine.cacheNamespace, lang.name, src), translated)
+                        cache.put(cacheKey(engine, src), translated)
                     } else if (resolved[idx] == null) {
                         // A blank is "render nothing", and is never cached so
                         // the next pass retries. Only a genuine cache miss may

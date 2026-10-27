@@ -10,6 +10,7 @@ import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.tasks.await
@@ -35,6 +36,9 @@ class OcrEngine {
     private val chinese: TextRecognizer by lazy {
         TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     }
+    private val latin: TextRecognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.Builder().build())
+    }
 
     private var pinned: SourceLang? = null
     private var lastWinner: SourceLang? = null
@@ -46,7 +50,11 @@ class OcrEngine {
         }
         pinned?.let { lang ->
             val lines = run(recognizerFor(lang), bitmap)
-            val strength = lines.sumOf { Script.cjkCount(it.text) }
+            val strength = if (lang == SourceLang.ES || lang == SourceLang.EN) {
+                lines.sumOf { l -> l.text.count { it.isLetter() } }
+            } else {
+                lines.sumOf { Script.cjkCount(it.text) }
+            }
             if (strength >= 6) return Result(lines, lang)
             pinned = null
             lastWinner = null
@@ -64,10 +72,8 @@ class OcrEngine {
     /**
      * Reads one balloon's crop, enlarged by the caller so the recognizers
      * see lettering at the size they were trained on. With [lang] known the
-     * matching recognizer runs alone; otherwise all three race and the
-     * strongest script signature wins, as on a full page — but nothing is
-     * pinned from a crop, and Latin lines are kept for the same reason they
-     * are kept on a page.
+     * matching recognizer runs alone; otherwise all recognizers race and the
+     * strongest script signature wins.
      */
     suspend fun recognizeRegion(bitmap: Bitmap, lang: SourceLang?): List<OcrLine> {
         val known = lang ?: pinned
@@ -77,14 +83,28 @@ class OcrEngine {
             val ko = async { runCatching { korean.process(image).await() }.getOrNull() }
             val ja = async { runCatching { japanese.process(image).await() }.getOrNull() }
             val zh = async { runCatching { chinese.process(image).await() }.getOrNull() }
-            val results = listOf(ko.await(), ja.await(), zh.await())
-            val scored = results.map { t ->
-                val text = t?.text ?: ""
-                maxOf(Script.hangulCount(text) * 3, Script.kanaCount(text) * 3 + Script.hanCount(text), Script.hanCount(text) * 2)
+            val lat = async { runCatching { latin.process(image).await() }.getOrNull() }
+            val koRes = ko.await()
+            val jaRes = ja.await()
+            val zhRes = zh.await()
+            val latRes = lat.await()
+
+            val koScore = koRes?.text?.let { Script.hangulCount(it) * 3 } ?: 0
+            val jaScore = jaRes?.text?.let { Script.kanaCount(it) * 3 + Script.hanCount(it) } ?: 0
+            val zhScore = zhRes?.text?.let { Script.hanCount(it) * 2 } ?: 0
+            val latLetters = latRes?.text?.count { it.isLetter() } ?: 0
+
+            val cjkMax = maxOf(koScore, jaScore, zhScore)
+            if (latLetters > 4 && latLetters > cjkMax) {
+                return@coroutineScope toLines(latRes)
             }
+            val results = listOf(koRes, jaRes, zhRes)
+            val scored = listOf(koScore, jaScore, zhScore)
             val best = scored.indices.maxBy { scored[it] }
             if (scored[best] >= 2) {
                 toLines(results[best])
+            } else if (latLetters > 0) {
+                toLines(latRes)
             } else {
                 toLines(results.maxByOrNull { it?.text?.count { c -> c.isLetter() } ?: 0 })
             }
@@ -94,7 +114,10 @@ class OcrEngine {
     private fun recognizerFor(lang: SourceLang): TextRecognizer = when (lang) {
         SourceLang.KO -> korean
         SourceLang.JA -> japanese
-        else -> chinese
+        SourceLang.ZH -> chinese
+        SourceLang.EN -> latin
+        SourceLang.ES -> latin
+        SourceLang.AUTO -> korean
     }
 
     private suspend fun race(bitmap: Bitmap): Result = coroutineScope {
@@ -102,9 +125,11 @@ class OcrEngine {
         val ko = async { runCatching { korean.process(image).await() }.getOrNull() }
         val ja = async { runCatching { japanese.process(image).await() }.getOrNull() }
         val zh = async { runCatching { chinese.process(image).await() }.getOrNull() }
+        val lat = async { runCatching { latin.process(image).await() }.getOrNull() }
         val koText = ko.await()
         val jaText = ja.await()
         val zhText = zh.await()
+        val latText = lat.await()
 
         val koScore = koText?.text?.let { Script.hangulCount(it) * 3 } ?: 0
         val jaScore = jaText?.text?.let { Script.kanaCount(it) * 3 + Script.hanCount(it) } ?: 0
@@ -116,32 +141,47 @@ class OcrEngine {
             SourceLang.ZH to zhScore,
         ).maxBy { it.second }
 
-        if (best.second < 4) {
-            lastWinner = null
-            winStreak = 0
-            // No CJK signature — but not necessarily no text. Aggregator
-            // sites routinely serve raws already translated once (Spanish and
-            // English are common), and the recognizers read Latin script
-            // fine. Throwing those lines away demoted every such page to
-            // blind vision guesses; keeping them gives the pipeline real
-            // geometry to anchor cards to. Never pinned: the next page may
-            // well be the CJK original again.
-            val fallback = listOf(koText, jaText, zhText)
-                .maxByOrNull { it?.text?.count { c -> c.isLetter() } ?: 0 }
-            return@coroutineScope Result(toLines(fallback), SourceLang.KO)
+        if (best.second >= 4) {
+            val winner = best.first
+            if (winner == lastWinner) {
+                if (++winStreak >= 2) pinned = winner
+            } else {
+                lastWinner = winner
+                winStreak = 1
+            }
+            val winText = when (winner) {
+                SourceLang.KO -> koText
+                SourceLang.JA -> jaText
+                SourceLang.ZH -> zhText
+                else -> koText
+            }
+            return@coroutineScope Result(toLines(winText), winner)
         }
-        if (best.first == lastWinner) winStreak++ else {
-            lastWinner = best.first
-            winStreak = 1
-        }
-        if (winStreak >= 2) pinned = best.first
 
-        val winnerText = when (best.first) {
-            SourceLang.KO -> koText
-            SourceLang.JA -> jaText
-            else -> zhText
+        // CJK signature is weak — inspect Latin recognizer output for Spanish or English
+        val latinTextStr = latText?.text ?: ""
+        val latinLetters = latinTextStr.count { it.isLetter() }
+        val hasSpanishMarkers = latinTextStr.any { it in "¡¿ñáéíóúÁÉÍÓÚÑ" }
+        val isSpanish = hasSpanishMarkers || Regex(
+            "\\b(el|la|los|las|un|una|que|es|en|por|con|para|pero|como|del|al|no|si|yo|tu|te|me|se)\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(latinTextStr)
+
+        if (latinLetters >= 4) {
+            val winner = if (isSpanish) SourceLang.ES else SourceLang.EN
+            if (winner == lastWinner) {
+                if (++winStreak >= 2) pinned = winner
+            } else {
+                lastWinner = winner
+                winStreak = 1
+            }
+            return@coroutineScope Result(toLines(latText), winner)
         }
-        Result(toLines(winnerText), best.first)
+
+        // Low confidence fallback
+        lastWinner = null
+        winStreak = 0
+        Result(toLines(latText ?: koText), SourceLang.AUTO)
     }
 
     private suspend fun run(recognizer: TextRecognizer, bitmap: Bitmap): List<OcrLine> {

@@ -4,6 +4,9 @@ import android.app.Activity
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -35,6 +38,7 @@ import app.mangalens.overlay.OverlayController
 import app.mangalens.overlay.RenderBubble
 import app.mangalens.pipeline.TranslatePipeline
 import app.mangalens.pipeline.UpgradeMerge
+import app.mangalens.settings.AppLang
 import app.mangalens.settings.AppSettings
 import app.mangalens.settings.CaptureMode
 import app.mangalens.settings.SettingsRepository
@@ -43,6 +47,7 @@ import app.mangalens.translate.GlossaryStore
 import app.mangalens.translate.TranslationCache
 import app.mangalens.translate.TranslationService
 import app.mangalens.translate.WorkMemory
+import app.mangalens.ui.AppStrings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -80,32 +85,25 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
         const val EXTRA_RESULT_DATA = "resultData"
 
         private const val NOTIF_ID = 41
-        private const val MOTION_THRESHOLD = 3.6
+        private const val MOTION_THRESHOLD = 4.0
+
+        /**
+         * While overlays are shown, require a larger motion to trigger a clear.
+         * This prevents pinch-to-zoom and tiny finger movements from dismissing
+         * translations the user is still reading.
+         */
+        private const val MOTION_THRESHOLD_SHOWING = 18.0
 
         /**
          * Share of the visible page that must differ from the page we
-         * translated before it counts as a new page. Readers that turn on a
-         * tap swap the page between two frames with no scroll to notice, and
-         * the swap is often too gentle for [MOTION_THRESHOLD] — two comic
-         * pages are mostly white, so the average difference stays low even
-         * when the panels are entirely different.
+         * translated before it counts as a new page.
          */
-        private const val PAGE_CHANGE_FRACTION = 0.015
+        private const val PAGE_CHANGE_FRACTION = 0.08
 
-        /**
-         * A deliberate slow scroll on a manhwa strip is the motion
-         * [MOTION_THRESHOLD] cannot see: mostly-white content slides over
-         * mostly-white content, so consecutive frames barely differ, while a
-         * new balloon glides in under a card that still shows the previous
-         * balloon's line. Row-profile alignment sees the slide directly, so
-         * frames are also compared for vertical drift — against a reference
-         * this many milliseconds old while scanning, and cumulatively against
-         * the translated page while cards are up.
-         */
         private const val SLOW_SCROLL_SAMPLE_MS = 420L
 
-        /** Thumb rows of drift (~2% of the screen) that count as scrolling. */
-        private const val SLOW_SCROLL_MIN_ROWS = 2
+        /** Thumb rows of drift that count as scrolling to a new section. */
+        private const val SLOW_SCROLL_MIN_ROWS = 8
 
         /**
          * Quiet time after which the frame is read ahead of the stability
@@ -252,12 +250,7 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
     private val gate = FrameGate(FRAME_INTERVAL_MS)
     private val recheckRunnable = Runnable { recheck() }
 
-    /**
-     * A frame that arrived inside the interval, kept — not copied — until
-     * the interval is up, when it is looked at unless a newer one has
-     * arrived by then. Capture thread only.
-     */
-    private var heldImage: Image? = null
+    private var heldBitmap: Bitmap? = null
     private var heldAt = 0L
 
     @Volatile private var lastMotionAt = 0L
@@ -268,6 +261,12 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
     @Volatile private var suppressUntil = 0L
     @Volatile private var state = State.SCANNING
     @Volatile private var paused = false
+
+    /**
+     * Bubbles frozen by [onTogglePause]. While paused, overlays stay visible
+     * even when the screen moves. Cleared when the user resumes.
+     */
+    private var frozenBubbles: List<RenderBubble>? = null
 
     private var translateJob: Job? = null
     private var lastShown: List<RenderBubble> = emptyList()
@@ -282,9 +281,14 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
         scope.launch {
             settingsRepo.flow.collect { s ->
                 settings = s
+                controller?.autoDim = s.autoDimFloating
                 controller?.bubbleView?.let { v ->
                     v.textScale = s.textScale
                     v.bgOpacity = s.bgOpacity
+                    v.bubbleTheme = s.bubbleTheme
+                    v.bubbleFont = s.bubbleFont
+                    v.bubbleShadow = s.bubbleShadow
+                    v.postInvalidate()
                 }
             }
         }
@@ -341,15 +345,19 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
         }, captureHandler)
         setupDisplay()
         controller = OverlayController(this, this).also { it.attach() }
+        controller?.autoDim = settings.autoDimFloating
         controller?.bubbleView?.let { v ->
             v.textScale = settings.textScale
             v.bgOpacity = settings.bgOpacity
+            v.bubbleTheme = settings.bubbleTheme
+            v.bubbleFont = settings.bubbleFont
+            v.bubbleShadow = settings.bubbleShadow
         }
         controller?.onFootprintChanged = { refreshOverlayMask() }
         refreshOverlayMask()
         running.value = true
         startTicker()
-        setPill("MangaLens is live — open your manhwa", 2600)
+        setPill(if (settings.appLang == AppLang.ID) "MangaLens aktif — buka komikmu" else "MangaLens is live — open your manhwa", 2600)
     }
 
     private fun displaySize(): Triple<Int, Int, Int> {
@@ -418,27 +426,34 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
 
     /** Runs on the capture HandlerThread. */
     private fun onFrame(reader: ImageReader) {
-        // Stop and rotation close the reader from the main thread while
-        // frames are still arriving here; a closed reader throws rather than
-        // returning null, and an already-acquired Image's buffer dies under
-        // the copy. Either way the frame is simply over.
         val image = try {
             reader.acquireLatestImage()
-        } catch (_: IllegalStateException) {
+        } catch (_: Throwable) {
             null
         } ?: return
-        val now = SystemClock.uptimeMillis()
-        lastFrameAt = now
-        when (gate.arrival(now)) {
-            FrameGate.Action.PROCESS -> {
-                dropHeld()
-                process(image, now)
+
+        try {
+            val bmp = imageToBitmap(image) ?: return
+            val now = SystemClock.uptimeMillis()
+            lastFrameAt = now
+            when (gate.arrival(now)) {
+                FrameGate.Action.PROCESS -> {
+                    heldBitmap = null
+                    processBitmap(bmp, now)
+                }
+                FrameGate.Action.HOLD_AND_SCHEDULE -> {
+                    heldBitmap = bmp
+                    heldAt = now
+                    captureHandler?.removeCallbacks(recheckRunnable)
+                    captureHandler?.postDelayed(recheckRunnable, gate.delayFor(now))
+                }
+                FrameGate.Action.HOLD -> {
+                    heldBitmap = bmp
+                    heldAt = now
+                }
             }
-            FrameGate.Action.HOLD_AND_SCHEDULE -> {
-                hold(image, now)
-                captureHandler?.postDelayed(recheckRunnable, gate.delayFor(now))
-            }
-            FrameGate.Action.HOLD -> hold(image, now)
+        } finally {
+            runCatching { image.close() }
         }
     }
 
@@ -448,58 +463,26 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
      * Runs on the capture HandlerThread.
      */
     private fun recheck() {
-        val newer = try {
-            imageReader?.acquireLatestImage()
-        } catch (_: IllegalStateException) {
-            null
-        }
         val now = SystemClock.uptimeMillis()
-        val image: Image
-        val arrivedAt: Long
-        if (newer != null) {
-            dropHeld()
-            image = newer
-            arrivedAt = now
-            lastFrameAt = now
-        } else {
-            image = heldImage ?: run {
-                gate.recheckIdle()
-                return
-            }
-            heldImage = null
-            arrivedAt = heldAt
+        val bmp = heldBitmap ?: run {
+            gate.recheckIdle()
+            return
         }
+        val arrivedAt = heldAt
         when (gate.recheck(now)) {
-            FrameGate.Action.PROCESS -> process(image, arrivedAt)
-            // A frame arrived and was looked at just before this fired; this
-            // one is newer still, so it waits its turn rather than going.
+            FrameGate.Action.PROCESS -> {
+                heldBitmap = null
+                processBitmap(bmp, arrivedAt)
+            }
             else -> {
-                hold(image, arrivedAt)
+                captureHandler?.removeCallbacks(recheckRunnable)
                 captureHandler?.postDelayed(recheckRunnable, gate.delayFor(now))
             }
         }
     }
 
-    /** Keeps [image] as the newest frame of the current interval, releasing the one held before. */
-    private fun hold(image: Image, arrivedAt: Long) {
-        dropHeld()
-        heldImage = image
-        heldAt = arrivedAt
-    }
-
-    private fun dropHeld() {
-        heldImage?.let { runCatching { it.close() } }
-        heldImage = null
-    }
-
-    /**
-     * Looks at one frame, which arrived at [now]: keeps it as the newest
-     * frame for the next pass to grab, and judges whether the screen moved
-     * or the page changed. Runs on the capture HandlerThread; closes [image].
-     */
-    private fun process(image: Image, now: Long) {
+    private fun processBitmap(bmp: Bitmap, now: Long) {
         try {
-            val bmp = imageToBitmap(image)
             synchronized(frameLock) {
                 latestBitmap = bmp
             }
@@ -508,26 +491,15 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
             prevThumb = thumb
             latestThumb = thumb
             val mask = overlayMask
-            // Our own painting and clearing is motion too, as far as
-            // frame-to-frame differencing can tell, so the two checks
-            // below sit out the moments around it. The comparison against
-            // the translated page, further down, does not have to: it
-            // excludes exactly the cells we paint, so our cards never fool
-            // it — and it must not sit out, because the polish paints
-            // balloon by balloon for as long as the model streams, and a
-            // reader who turned the page while it did would otherwise not
-            // be noticed until the stream ended.
             if (now >= suppressUntil) {
-                if (diff > MOTION_THRESHOLD) {
+                val motionBar = if (state == State.SHOWING) MOTION_THRESHOLD_SHOWING else MOTION_THRESHOLD
+                if (diff > motionBar) {
                     lastMotionAt = now
                     slowRefThumb = null
                     if (state != State.SCANNING) scope.launch { onMotion() }
                     else if (preparing) scope.launch { discardPrepared() }
                     return
                 }
-                // Slow scrolls hide from frame differencing, so drift is measured
-                // over a longer baseline: whatever this sampled check misses while
-                // cards are up, the cumulative check below accumulates.
                 val ref = slowRefThumb
                 if (ref == null) {
                     slowRefThumb = thumb
@@ -545,20 +517,6 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
                 }
             }
             if (state == State.SHOWING || (state == State.TRANSLATING && midPassCancels < MAX_MID_PASS_CANCELS)) {
-                // Two ways this page can stop being the page we translated: it
-                // was replaced (tap-to-turn swap — cells change in place), or
-                // it moved (slow scroll — cells shift, and the balloon that
-                // matters most may slide in under a card, changing only masked
-                // cells). Check for both against the translated page itself,
-                // from the moment it is grabbed until its cards come down.
-                //
-                // The threshold adapts to how much of the page our own cards
-                // hide. On a dense page the cards cover most of the text — the
-                // very cells a page swap changes hardest — so the comparison
-                // runs over gutters and margins, where a real swap moves far
-                // fewer cells. Demanding the full fraction there is how a
-                // tap-to-turn under blanket coverage went unnoticed while the
-                // old page's cards sat on the new page.
                 val base = shownThumb ?: return
                 val cov = FrameStability.coverage(mask)
                 val pageBar = PAGE_CHANGE_FRACTION * when {
@@ -573,36 +531,44 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
                     scope.launch { onMotion(pageChanged = true) }
                 }
             }
-        } catch (_: IllegalStateException) {
-            return
-        } finally {
-            runCatching { image.close() }
+        } catch (_: Throwable) {
+            // Never crash foreground capture loop
         }
     }
 
     /**
-     * Copies the frame into one of two reused buffers (stride-padded width;
-     * cropped only when a translation pass actually grabs it).
+     * Safely copies the frame into one of two reused buffers (stride-padded width).
+     * Protected against JNI or Surface invalidation errors.
      */
-    private fun imageToBitmap(image: Image): Bitmap {
-        val plane = image.planes[0]
-        val strideW = plane.rowStride / plane.pixelStride
-        val current = synchronized(frameLock) { latestBitmap }
-        var target = if (current === frameA && frameA != null) frameB else frameA
-        if (target == null || target.width != strideW || target.height != image.height) {
-            target?.recycle()
-            target = Bitmap.createBitmap(strideW, image.height, Bitmap.Config.ARGB_8888)
-            if (current === frameA && frameA != null) frameB = target else frameA = target
+    private fun imageToBitmap(image: Image): Bitmap? {
+        return try {
+            val planes = image.planes
+            if (planes.isNullOrEmpty()) return null
+            val plane = planes[0] ?: return null
+            val buffer = plane.buffer ?: return null
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+            if (pixelStride <= 0 || rowStride <= 0) return null
+            val strideW = rowStride / pixelStride
+            val current = synchronized(frameLock) { latestBitmap }
+            var target = if (current === frameA && frameA != null) frameB else frameA
+            if (target == null || target.width != strideW || target.height != image.height) {
+                target?.recycle()
+                target = Bitmap.createBitmap(strideW, image.height, Bitmap.Config.ARGB_8888)
+                if (current === frameA && frameA != null) frameB = target else frameA = target
+            }
+            buffer.rewind()
+            target.copyPixelsFromBuffer(buffer)
+            target
+        } catch (_: Throwable) {
+            null
         }
-        plane.buffer.rewind()
-        target.copyPixelsFromBuffer(plane.buffer)
-        return target
     }
 
     /** Serialized onto the capture thread so a buffer is never freed mid-write. */
     private fun releaseFrameBuffers() {
         val action = Runnable {
-            dropHeld()
+            heldBitmap = null
             synchronized(frameLock) { latestBitmap = null }
             frameA?.recycle()
             frameB?.recycle()
@@ -625,8 +591,18 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
     /**
      * The screen moved, or — [pageChanged] — the page under the cards is no
      * longer the page they were written for. Main thread only.
+     * When [paused], motion never clears cards — the overlay is frozen.
      */
     private fun onMotion(pageChanged: Boolean = false) {
+        if (paused) {
+            // Restore the frozen overlay so it stays visible even after motion or zoom.
+            frozenBubbles?.let { paintCards(it) }
+            return
+        }
+        if (settings.mode == CaptureMode.MANUAL && state == State.SHOWING) {
+            // In manual mode (tap to translate), the user wants to read and zoom without automatic dismiss.
+            return
+        }
         when (state) {
             State.TRANSLATING -> {
                 if (pageChanged) midPassCancels++ else midPassCancels = 0
@@ -637,11 +613,14 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
                 setPill(null)
             }
             State.SHOWING -> {
-                if (!pageChanged) midPassCancels = 0
-                state = State.SCANNING
-                shownThumb = null
-                clearCards()
-                setPill(null)
+                // In auto mode, only clear cards when the page actually changed (swapped or scrolled far away).
+                // Gentle motion, hand jitter, or pinch-zoom should NOT dismiss cards!
+                if (pageChanged) {
+                    state = State.SCANNING
+                    shownThumb = null
+                    clearCards()
+                    setPill(null)
+                }
             }
             State.SCANNING -> Unit
         }
@@ -827,7 +806,7 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
                 var ahead: TranslatePipeline.Analysis? = null
                 val prep = takePrepared()
                 if (prep != null) {
-                    setPill("translating…")
+                    setPill(AppStrings.pillTranslating(settings.appLang))
                     val read = try {
                         prep.job.await()
                     } catch (e: CancellationException) {
@@ -852,7 +831,7 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
                         return@launch
                     }
                     bmp = fresh
-                    setPill("translating…")
+                    setPill(AppStrings.pillTranslating(settings.appLang))
                     withContext(Dispatchers.Default) {
                         shownThumb = FrameStability.grayThumbOf(fresh)
                         pipeline.analyze(fresh, settings, exclusions)
@@ -908,7 +887,7 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
                 if (result.diag != null) {
                     setPill("${result.engineLabel.ifBlank { "—" }} · ${result.diag} · ${works.describe()}")
                 } else if (shown.isEmpty()) {
-                    setPill(if (auto) null else "no text found", 1800)
+                    setPill(if (auto) null else AppStrings.pillNoText(settings.appLang), 1800)
                 } else {
                     val mark = if (result.polished && result.bubbles.isNotEmpty()) "✨" else "✓"
                     val kept = if (shown.size > result.bubbles.size) " · draft kept" else ""
@@ -985,14 +964,20 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
     override fun onTogglePause() {
         paused = !paused
         if (paused) {
+            // Freeze the overlay: cancel any in-flight pass and lock the cards on screen
+            // so the reader can pinch-to-zoom and read without cards disappearing.
             translateJob?.cancel()
             discardPrepared()
+            val toFreeze = if (lastShown.isNotEmpty()) lastShown else controller?.bubbleView?.currentBubbles.orEmpty()
+            frozenBubbles = toFreeze.ifEmpty { null }
+            frozenBubbles?.let { paintCards(it) }
+            setPill(AppStrings.pillPaused(settings.appLang), 2500)
+        } else {
+            // Resume: drop the frozen snapshot and go back to live mode.
+            frozenBubbles = null
             state = State.SCANNING
             shownThumb = null
-            clearCards()
-            setPill("paused", 1600)
-        } else {
-            setPill("live", 1200)
+            setPill(AppStrings.pillLive(settings.appLang), 1200)
         }
         controller?.setPaused(paused)
         updateNotification()
@@ -1001,7 +986,12 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
     override fun onToggleMode() {
         val next = if (settings.mode == CaptureMode.AUTO) CaptureMode.MANUAL else CaptureMode.AUTO
         scope.launch { settingsRepo.setMode(next) }
-        setPill(if (next == CaptureMode.AUTO) "auto-live mode" else "tap the button to translate", 2200)
+        val msg = if (settings.appLang == AppLang.ID) {
+            if (next == CaptureMode.AUTO) "Mode otomatis live" else "Ketuk tombol untuk menerjemahkan"
+        } else {
+            if (next == CaptureMode.AUTO) "auto-live mode" else "tap the button to translate"
+        }
+        setPill(msg, 2200)
     }
 
     override fun onPeek() {
@@ -1024,6 +1014,22 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
         }
     }
 
+    override fun onCopyText() {
+        val shown = lastShown
+        val textToCopy = shown
+            .map { it.translated.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+        if (textToCopy.isNotBlank()) {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clip = ClipData.newPlainText("MangaLens", textToCopy)
+            cm?.setPrimaryClip(clip)
+            setPill(AppStrings.toastCopied(settings.appLang), 2000)
+        } else {
+            setPill(if (settings.appLang == AppLang.ID) "Tidak ada teks untuk disalin" else "No text to copy", 1800)
+        }
+    }
+
     override fun onOpenSettings() {
         startActivity(
             Intent(this, MainActivity::class.java)
@@ -1038,6 +1044,7 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
     override fun isPaused() = paused
 
     override fun isAutoMode() = settings.mode == CaptureMode.AUTO
+    override fun appLang() = settings.appLang
 
     // ---- notification ----
 
@@ -1053,14 +1060,15 @@ class ScreenCaptureService : Service(), OverlayController.Listener {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val lang = settings.appLang
         return NotificationCompat.Builder(this, MangaLensApp.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_bubble)
-            .setContentTitle("MangaLens is translating your screen")
-            .setContentText(if (paused) "Paused" else "Live — bubbles translate as you read")
+            .setContentTitle(AppStrings.notifTitle(lang))
+            .setContentText(AppStrings.notifContent(lang, paused))
             .setOngoing(true)
             .setContentIntent(open)
-            .addAction(0, if (paused) "Resume" else "Pause", serviceIntent(ACTION_TOGGLE_PAUSE, 2))
-            .addAction(0, "Stop", serviceIntent(ACTION_STOP, 1))
+            .addAction(0, if (paused) AppStrings.notifActionResume(lang) else AppStrings.notifActionPause(lang), serviceIntent(ACTION_TOGGLE_PAUSE, 2))
+            .addAction(0, AppStrings.notifActionStop(lang), serviceIntent(ACTION_STOP, 1))
             .build()
     }
 

@@ -32,13 +32,15 @@ class MainActivity : ComponentActivity() {
                     .putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
                     .putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
                 ContextCompat.startForegroundService(this, intent)
+                val isIndo = runCatching { kotlinx.coroutines.runBlocking { repo.current().appLang == app.mangalens.settings.AppLang.ID } }.getOrDefault(true)
                 Toast.makeText(
                     this,
-                    "MangaLens is on — switch to Brave and start reading",
+                    if (isIndo) "MangaLens aktif — buka browser dan mulai membaca" else "MangaLens is on — switch to Brave and start reading",
                     Toast.LENGTH_LONG
                 ).show()
             } else {
-                Toast.makeText(this, "Screen capture permission is required", Toast.LENGTH_LONG).show()
+                val isIndo = runCatching { kotlinx.coroutines.runBlocking { repo.current().appLang == app.mangalens.settings.AppLang.ID } }.getOrDefault(true)
+                Toast.makeText(this, if (isIndo) "Izin perekaman layar diperlukan" else "Screen capture permission is required", Toast.LENGTH_LONG).show()
             }
         }
 
@@ -75,9 +77,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openOverlaySettings() {
+        val isIndo = runCatching { kotlinx.coroutines.runBlocking { repo.current().appLang == app.mangalens.settings.AppLang.ID } }.getOrDefault(true)
         Toast.makeText(
             this,
-            "Allow \"Display over other apps\" for MangaLens, then come back",
+            if (isIndo) "Izinkan \"Tampilkan di atas aplikasi lain\" untuk MangaLens, lalu kembali ke aplikasi" else "Allow \"Display over other apps\" for MangaLens, then come back",
             Toast.LENGTH_LONG
         ).show()
         startActivity(

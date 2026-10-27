@@ -1,9 +1,9 @@
 package app.mangalens.ui
 
 import android.os.Build
-
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -31,35 +32,48 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.mangalens.R
 import app.mangalens.capture.ScreenCaptureService
 import app.mangalens.settings.AiReasoning
 import app.mangalens.settings.AiVisionMode
+import app.mangalens.settings.AppLang
 import app.mangalens.settings.AppSettings
+import app.mangalens.settings.BubbleFont
+import app.mangalens.settings.BubbleTheme
 import app.mangalens.settings.CaptureMode
 import app.mangalens.settings.EngineKind
 import app.mangalens.settings.LlmProvider
 import app.mangalens.settings.SettingsRepository
 import app.mangalens.settings.SourceLang
+import app.mangalens.settings.TargetLang
 import app.mangalens.translate.GoogleFreeEngine
 import app.mangalens.translate.LlmEngine
 import app.mangalens.translate.MlKitEngine
@@ -76,7 +90,6 @@ fun HomeScreen(
     onGrantOverlay: () -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val settings by repo.flow.collectAsState(initial = AppSettings())
     val running by ScreenCaptureService.running.collectAsState()
 
@@ -104,33 +117,83 @@ fun HomeScreen(
         }
     }
 
+    var selectedTab by remember { mutableIntStateOf(0) }
+    val tabTitles = listOf(
+        if (settings.appLang == AppLang.ID) "Terjemahan" else "Translate",
+        if (settings.appLang == AppLang.ID) "Tampilan Balon" else "Bubble Style",
+        if (settings.appLang == AppLang.ID) "Panduan & Info" else "Guide & Info",
+    )
+
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier
                 .safeDrawingPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp)
+                .fillMaxSize()
         ) {
-            Header()
-            Spacer(Modifier.height(18.dp))
-            StatusCard(running, overlayGranted, onStart, onStop, onGrantOverlay)
-            Spacer(Modifier.height(14.dp))
-            update?.let {
-                UpdateCard(it)
-                Spacer(Modifier.height(14.dp))
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
+                Header(settings.appLang)
             }
-            EngineCard(settings, repo)
-            Spacer(Modifier.height(14.dp))
-            ReadingCard(settings, repo)
-            Spacer(Modifier.height(14.dp))
-            TipsCard()
-            Spacer(Modifier.height(24.dp))
+
+            TabRow(
+                selectedTabIndex = selectedTab,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary,
+            ) {
+                tabTitles.forEachIndexed { index, title ->
+                    Tab(
+                        selected = selectedTab == index,
+                        onClick = { selectedTab = index },
+                        text = {
+                            Text(
+                                title,
+                                fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal,
+                                maxLines = 1,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp)
+            ) {
+                when (selectedTab) {
+                    0 -> {
+                        StatusCard(running, overlayGranted, settings.appLang, onStart, onStop, onGrantOverlay)
+                        Spacer(Modifier.height(14.dp))
+                        LanguageCard(settings, repo)
+                        Spacer(Modifier.height(14.dp))
+                        EngineCard(settings, repo)
+                        Spacer(Modifier.height(14.dp))
+                        ModeCard(settings, repo)
+                    }
+                    1 -> {
+                        LivePreviewCard(settings)
+                        Spacer(Modifier.height(14.dp))
+                        BubbleStyleCard(settings, repo)
+                    }
+                    2 -> {
+                        TipsCard(settings.appLang)
+                        Spacer(Modifier.height(14.dp))
+                        AppLanguageCard(settings, repo)
+                        update?.let {
+                            Spacer(Modifier.height(14.dp))
+                            UpdateCard(it)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun Header() {
+private fun Header(lang: AppLang) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
@@ -142,9 +205,9 @@ private fun Header() {
         }
         Spacer(Modifier.width(12.dp))
         Column {
-            Text("MangaLens", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(AppStrings.appTitle(lang), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text(
-                "Live manhwa · manga · manhua translation over any app",
+                AppStrings.appSubtitle(lang),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -153,9 +216,29 @@ private fun Header() {
 }
 
 @Composable
+private fun AppLanguageCard(settings: AppSettings, repo: SettingsRepository) {
+    val scope = rememberCoroutineScope()
+    Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            SectionTitle(AppStrings.sectionAppLang(settings.appLang))
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("🇮🇩  Bahasa Indonesia", settings.appLang == AppLang.ID) {
+                    scope.launch { repo.setAppLang(AppLang.ID) }
+                }
+                Chip("🇬🇧  English", settings.appLang == AppLang.EN) {
+                    scope.launch { repo.setAppLang(AppLang.EN) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun StatusCard(
     running: Boolean,
     overlayGranted: Boolean,
+    lang: AppLang,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onGrantOverlay: () -> Unit,
@@ -174,36 +257,334 @@ private fun StatusCard(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    if (running) "Translating your screen" else "Not running",
+                    if (running) AppStrings.translatingScreen(lang) else AppStrings.notRunning(lang),
                     style = MaterialTheme.typography.titleMedium
                 )
             }
             Spacer(Modifier.height(10.dp))
             if (!overlayGranted) {
                 Text(
-                    "Step 1 · Allow MangaLens to draw over other apps",
+                    AppStrings.overlayPermissionStep(lang),
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = onGrantOverlay) { Text("Grant overlay permission") }
+                OutlinedButton(onClick = onGrantOverlay) { Text(AppStrings.grantOverlayBtn(lang)) }
                 Spacer(Modifier.height(10.dp))
             }
             if (running) {
-                Button(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("Stop") }
+                Button(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text(AppStrings.stopBtn(lang)) }
             } else {
                 Button(
                     onClick = onStart,
                     enabled = overlayGranted,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (overlayGranted) "Start translating" else "Grant permission first") }
+                ) { Text(AppStrings.startBtn(lang, overlayGranted)) }
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "Then open Brave and read. When you stop scrolling, bubbles are translated in place. " +
-                    "Tap the floating 文A button to switch translation on or off; long-press it for the quick menu (translate now, peek, settings).",
+                AppStrings.howToUse(lang),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+@Composable
+private fun ModeCard(settings: AppSettings, repo: SettingsRepository) {
+    val scope = rememberCoroutineScope()
+    val lang = settings.appLang
+    Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            SectionTitle(AppStrings.mode(lang))
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip(AppStrings.modeAuto(lang), settings.mode == CaptureMode.AUTO) {
+                    scope.launch { repo.setMode(CaptureMode.AUTO) }
+                }
+                Chip(AppStrings.modeManual(lang), settings.mode == CaptureMode.MANUAL) {
+                    scope.launch { repo.setMode(CaptureMode.MANUAL) }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (settings.mode == CaptureMode.AUTO) {
+                    if (lang == AppLang.ID) "Menerjemahkan secara otomatis saat kamu membaca dan layar berhenti bergerak sejenak."
+                    else "Translates automatically as you read whenever the page stays still."
+                } else {
+                    if (lang == AppLang.ID) "Hanya menerjemahkan saat kamu mengetuk tombol melayang 文A."
+                    else "Translates only when you tap the floating 文A button."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (settings.mode == CaptureMode.AUTO) {
+                Spacer(Modifier.height(12.dp))
+                LabeledSlider(
+                    AppStrings.reactionTime(lang),
+                    settings.stabilityMs.toFloat(),
+                    200f..900f,
+                    { "${it.toInt()} ms" },
+                ) { scope.launch { repo.setStabilityMs(it.toInt()) } }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LanguageCard(settings: AppSettings, repo: SettingsRepository) {
+    val scope = rememberCoroutineScope()
+    val lang = settings.appLang
+    Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            SectionTitle(AppStrings.sourceLanguage(lang))
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Chip("Auto", settings.sourceLang == SourceLang.AUTO) {
+                    scope.launch { repo.setSourceLang(SourceLang.AUTO) }
+                }
+                Chip("한국어 (Korea)", settings.sourceLang == SourceLang.KO) {
+                    scope.launch { repo.setSourceLang(SourceLang.KO) }
+                }
+                Chip("日本語 (Jepang)", settings.sourceLang == SourceLang.JA) {
+                    scope.launch { repo.setSourceLang(SourceLang.JA) }
+                }
+                Chip("中文 (China)", settings.sourceLang == SourceLang.ZH) {
+                    scope.launch { repo.setSourceLang(SourceLang.ZH) }
+                }
+                Chip("English", settings.sourceLang == SourceLang.EN) {
+                    scope.launch { repo.setSourceLang(SourceLang.EN) }
+                }
+                Chip("Español (Spanyol)", settings.sourceLang == SourceLang.ES) {
+                    scope.launch { repo.setSourceLang(SourceLang.ES) }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            SectionTitle(AppStrings.translateTo(lang))
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("🇮🇩  Indonesia", settings.targetLang == TargetLang.ID) {
+                    scope.launch { repo.setTargetLang(TargetLang.ID) }
+                }
+                Chip("🇬🇧  English", settings.targetLang == TargetLang.EN) {
+                    scope.launch { repo.setTargetLang(TargetLang.EN) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LivePreviewCard(settings: AppSettings) {
+    val lang = settings.appLang
+    var peeked by remember { mutableStateOf(false) }
+
+    Card(
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SectionTitle(AppStrings.livePreviewTitle(lang))
+                Text(
+                    if (lang == AppLang.ID) "Ketuk balon untuk uji intip" else "Tap bubble to peek",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+
+            // Faux Comic Panel Frame
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(140.dp)
+                    .background(
+                        Color(0xFF1E212B),
+                        RoundedCornerShape(12.dp)
+                    )
+                    .padding(12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                // Background comic panel art simulation
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text("💥 💬", fontSize = 22.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        AppStrings.livePreviewSampleOriginal(lang),
+                        color = Color(0xFF8C92AC),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Translated floating bubble
+                if (!peeked) {
+                    val (bgColor, textColor) = when (settings.bubbleTheme) {
+                        BubbleTheme.WHITE -> Color.White to Color(0xFF17181C)
+                        BubbleTheme.DARK -> Color(0xFF181920) to Color(0xFFF4F5F8)
+                        BubbleTheme.SEPIA -> Color(0xFFFFF8E7) to Color(0xFF2C2218)
+                        BubbleTheme.AUTO -> Color.White to Color(0xFF17181C)
+                    }
+
+                    val fontFamily = when (settings.bubbleFont) {
+                        BubbleFont.COMIC -> FontFamily(Font(R.font.komika_axis))
+                        BubbleFont.SANS -> FontFamily.SansSerif
+                        BubbleFont.SERIF -> FontFamily.Serif
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clickable { peeked = true }
+                            .then(
+                                if (settings.bubbleShadow) {
+                                    Modifier
+                                        .background(
+                                            Color(0x35000000),
+                                            RoundedCornerShape(16.dp)
+                                        )
+                                        .padding(bottom = 2.dp)
+                                } else Modifier
+                            )
+                            .background(bgColor, RoundedCornerShape(14.dp))
+                            .padding(horizontal = 18.dp, vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = AppStrings.livePreviewSampleTranslated(lang),
+                            color = textColor,
+                            fontSize = (14 * settings.textScale).sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = fontFamily,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+
+            LaunchedEffect(peeked) {
+                if (peeked) {
+                    delay(1200)
+                    peeked = false
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BubbleStyleCard(settings: AppSettings, repo: SettingsRepository) {
+    val scope = rememberCoroutineScope()
+    val lang = settings.appLang
+
+    Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            SectionTitle(AppStrings.bubbleThemeTitle(lang))
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Chip(AppStrings.bubbleThemeAuto(lang), settings.bubbleTheme == BubbleTheme.AUTO) {
+                    scope.launch { repo.setBubbleTheme(BubbleTheme.AUTO) }
+                }
+                Chip(AppStrings.bubbleThemeWhite(lang), settings.bubbleTheme == BubbleTheme.WHITE) {
+                    scope.launch { repo.setBubbleTheme(BubbleTheme.WHITE) }
+                }
+                Chip(AppStrings.bubbleThemeDark(lang), settings.bubbleTheme == BubbleTheme.DARK) {
+                    scope.launch { repo.setBubbleTheme(BubbleTheme.DARK) }
+                }
+                Chip(AppStrings.bubbleThemeSepia(lang), settings.bubbleTheme == BubbleTheme.SEPIA) {
+                    scope.launch { repo.setBubbleTheme(BubbleTheme.SEPIA) }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            SectionTitle(AppStrings.bubbleFontTitle(lang))
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Chip(AppStrings.bubbleFontComic(lang), settings.bubbleFont == BubbleFont.COMIC) {
+                    scope.launch { repo.setBubbleFont(BubbleFont.COMIC) }
+                }
+                Chip(AppStrings.bubbleFontSans(lang), settings.bubbleFont == BubbleFont.SANS) {
+                    scope.launch { repo.setBubbleFont(BubbleFont.SANS) }
+                }
+                Chip(AppStrings.bubbleFontSerif(lang), settings.bubbleFont == BubbleFont.SERIF) {
+                    scope.launch { repo.setBubbleFont(BubbleFont.SERIF) }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            LabeledSlider(
+                AppStrings.textSize(lang),
+                settings.textScale,
+                0.8f..1.5f,
+                { "${(it * 100).toInt()}%" },
+            ) { scope.launch { repo.setTextScale(it) } }
+
+            Spacer(Modifier.height(12.dp))
+            // Bubble Drop Shadow Toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(AppStrings.bubbleShadowTitle(lang), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text(AppStrings.bubbleShadowDesc(lang), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = settings.bubbleShadow,
+                    onCheckedChange = { checked -> scope.launch { repo.setBubbleShadow(checked) } }
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+            // Auto-Dim Ghost Mode Toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(AppStrings.autoDimTitle(lang), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text(AppStrings.autoDimDesc(lang), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = settings.autoDimFloating,
+                    onCheckedChange = { checked -> scope.launch { repo.setAutoDimFloating(checked) } }
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+            LabeledSlider(
+                AppStrings.ignoreTop(lang),
+                settings.ignoreTopPct,
+                0f..0.15f,
+                { "${(it * 100).toInt()}%" },
+            ) { scope.launch { repo.setIgnoreTopPct(it) } }
+
+            LabeledSlider(
+                AppStrings.ignoreBottom(lang),
+                settings.ignoreBottomPct,
+                0f..0.15f,
+                { "${(it * 100).toInt()}%" },
+            ) { scope.launch { repo.setIgnoreBottomPct(it) } }
         }
     }
 }
@@ -244,8 +625,6 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
     var customUrlEdited by remember { mutableStateOf(false) }
 
     LaunchedEffect(settings.provider, settings.apiKey) {
-        // collectAsState starts with defaults. Accept the first real DataStore
-        // value, but never echo an older write over text being typed.
         if (!keyEdited) keyDraft = settings.apiKey
     }
     LaunchedEffect(settings.provider, settings.model) {
@@ -262,13 +641,13 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
 
     Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.padding(16.dp)) {
-            SectionTitle("Translation engine")
+            SectionTitle(if (settings.appLang == AppLang.ID) "Pilihan Mesin Terjemahan" else "Translation Engine")
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Chip("Free · Google", settings.engine == EngineKind.GOOGLE) {
                     scope.launch { repo.setEngine(EngineKind.GOOGLE) }
                 }
-                Chip("AI Pro ✨", settings.engine == EngineKind.LLM) {
+                Chip("AI Pro ✨ (Gemini)", settings.engine == EngineKind.LLM) {
                     scope.launch { repo.setEngine(EngineKind.LLM) }
                 }
                 Chip("Offline", settings.engine == EngineKind.MLKIT) {
@@ -278,9 +657,18 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
             Spacer(Modifier.height(8.dp))
             Text(
                 when (settings.engine) {
-                    EngineKind.GOOGLE -> "Works instantly, no setup. Solid everyday quality."
-                    EngineKind.LLM -> "Feels like an official release: the AI reads whole pages (even the raw image) with story memory, a name glossary, natural tone and honorifics. A fast draft appears instantly; the AI polish replaces it seconds later. Needs an API key — Gemini's is free."
-                    EngineKind.MLKIT -> "100% offline after a one-time ~30 MB model download per language. Roughest quality of the three."
+                    EngineKind.GOOGLE -> if (settings.appLang == AppLang.ID)
+                        "Langsung aktif tanpa setup. Cepat untuk penggunaan sehari-hari."
+                    else
+                        "Works instantly, no setup. Solid everyday quality."
+                    EngineKind.LLM -> if (settings.appLang == AppLang.ID)
+                        "Kualitas seperti komik resmi: memahami alur cerita, konteks visual, nama karakter, dan panggilan alami. Gratis via Gemini API."
+                    else
+                        "Feels like an official release: reads whole pages with story memory and natural tone. Needs an API key — Gemini's is free."
+                    EngineKind.MLKIT -> if (settings.appLang == AppLang.ID)
+                        "100% offline setelah unduh model ~30 MB. Kualitas standar."
+                    else
+                        "100% offline after a one-time ~30 MB model download per language."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -305,7 +693,7 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     trailingIcon = {
                         Text(
-                            if (showKey) "hide" else "show",
+                            if (showKey) "sembunyikan" else "lihat",
                             modifier = Modifier
                                 .clickable { showKey = !showKey }
                                 .padding(end = 10.dp),
@@ -315,6 +703,59 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                // Dedicated Gemini Connection Tester
+                if (settings.provider == LlmProvider.GEMINI) {
+                    Spacer(Modifier.height(8.dp))
+                    var testerLoading by remember { mutableStateOf(false) }
+                    var testStatus by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+
+                    OutlinedButton(
+                        onClick = {
+                            val key = keyDraft.trim()
+                            if (key.isBlank()) {
+                                testStatus = false to if (settings.appLang == AppLang.ID) "Tempel API Key terlebih dahulu." else "Please enter your API Key first."
+                                return@OutlinedButton
+                            }
+                            testerLoading = true
+                            testStatus = null
+                            scope.launch {
+                                try {
+                                    val list = ModelCatalog.gemini(key)
+                                    if (list.isNotEmpty()) {
+                                        testStatus = true to AppStrings.geminiSuccess(settings.appLang)
+                                    } else {
+                                        testStatus = false to (AppStrings.geminiFailed(settings.appLang) + "Tidak ada model yang ditemukan")
+                                    }
+                                } catch (e: Exception) {
+                                    testStatus = false to (AppStrings.geminiFailed(settings.appLang) + (e.message ?: "Koneksi bermasalah"))
+                                } finally {
+                                    testerLoading = false
+                                }
+                            }
+                        },
+                        enabled = !testerLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (testerLoading) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(AppStrings.geminiTesting(settings.appLang))
+                        } else {
+                            Text("⚡ " + AppStrings.geminiTester(settings.appLang))
+                        }
+                    }
+                    testStatus?.let { (success, msg) ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (success) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = modelDraft,
@@ -324,7 +765,7 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
                         val provider = settings.provider
                         scope.launch { repo.setModel(provider, it.trim()) }
                     },
-                    label = { Text("Model (blank = ${draftSettings.copy(model = "").effectiveModel()})") },
+                    label = { Text("Model (kosong = ${draftSettings.copy(model = "").effectiveModel()})") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -352,69 +793,51 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
                     )
                 }
                 Spacer(Modifier.height(12.dp))
-                Text("AI Vision — let the AI read the raw page image", style = MaterialTheme.typography.bodyMedium)
+                Text("AI Vision — izin AI membaca gambar komik langsung", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Chip("AI Vision (recommended)", settings.aiVision != AiVisionMode.OFF) {
+                    Chip("AI Vision (Rekomendasi)", settings.aiVision != AiVisionMode.OFF) {
                         scope.launch { repo.setAiVision(AiVisionMode.AUTO) }
                     }
-                    Chip("Text only", settings.aiVision == AiVisionMode.OFF) {
+                    Chip("Hanya Teks", settings.aiVision == AiVisionMode.OFF) {
                         scope.launch { repo.setAiVision(AiVisionMode.OFF) }
                     }
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
                     if (settings.aiVision != AiVisionMode.OFF)
-                        "The AI reads the page image itself — catches handwriting, stylized lettering and anything OCR misses, in manhwa and manga alike (~150–300 KB per page, less with Data saver). Falls back to text-only, then Google, automatically."
+                        "AI membaca gambar komik langsung sehingga menangkap tulisan tangan, efek suara, dan teks meliuk yang luput oleh OCR."
                     else
-                        "Only OCR'd text is sent (a few KB). Best for very slow internet; stylized lettering depends on on-device OCR.",
+                        "Hanya teks hasil OCR yang dikirim (hemat kuota).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(10.dp))
-                Text("AI reasoning — how long the model may think per page", style = MaterialTheme.typography.bodyMedium)
+                Text("AI reasoning — kedalaman pemikiran AI per halaman", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Chip("Fast", settings.aiReasoning == AiReasoning.FAST) {
+                    Chip("Cepat (Fast)", settings.aiReasoning == AiReasoning.FAST) {
                         scope.launch { repo.setAiReasoning(AiReasoning.FAST) }
                     }
-                    Chip("Balanced", settings.aiReasoning == AiReasoning.BALANCED) {
+                    Chip("Seimbang (Balanced)", settings.aiReasoning == AiReasoning.BALANCED) {
                         scope.launch { repo.setAiReasoning(AiReasoning.BALANCED) }
                     }
-                    Chip("Thorough", settings.aiReasoning == AiReasoning.THOROUGH) {
+                    Chip("Mendalam (Thorough)", settings.aiReasoning == AiReasoning.THOROUGH) {
                         scope.launch { repo.setAiReasoning(AiReasoning.THOROUGH) }
                     }
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    when (settings.aiReasoning) {
-                        AiReasoning.FAST -> "Least thinking the model allows: the polish lands soonest. Fine for clean, horizontal lettering."
-                        AiReasoning.BALANCED -> "A little thinking on the page image, the least on text. Balloons stream in one by one either way."
-                        AiReasoning.THOROUGH -> "The model's full reasoning depth: best speaker attribution and hard lettering, at a longer wait for the first balloon."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Chip("Data saver — smaller page uploads", settings.dataSaver) {
+                    Chip("Penghemat data — kompresi gambar halaman", settings.dataSaver) {
                         scope.launch { repo.setDataSaver(!settings.dataSaver) }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Chip("Diagnostics — show what was detected", settings.diagnostics) {
+                    Chip("Diagnostik — tampilkan garis deteksi balon", settings.diagnostics) {
                         scope.launch { repo.setDiagnostics(!settings.diagnostics) }
                     }
                 }
-                Text(
-                    "Outlines every balloon found and keeps a status line up: " +
-                        "ocr (text lines read) · balloons (found in the page) · " +
-                        "regions (sent to translate) · cards (painted). " +
-                        "If a balloon is untranslated, this says which step lost it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
                 Spacer(Modifier.height(10.dp))
                 val uriHandler = LocalUriHandler.current
                 val keyHelp = providerKeyHelp(settings.provider)
@@ -436,7 +859,12 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            if (settings.engine == EngineKind.MLKIT) {
+                Spacer(Modifier.height(12.dp))
+                OfflineModelSection(settings)
+            }
+
+            Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(
                     enabled = !testing,
@@ -445,13 +873,20 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
                         testResult = null
                         scope.launch {
                             testResult = try {
-                                val sample = listOf("괜찮아. 내가 지켜줄게.")
-                                val out = when (settings.engine) {
-                                    EngineKind.LLM -> LlmEngine(draftSettings).translate(sample, SourceLang.KO)
-                                    EngineKind.MLKIT -> MlKitEngine().translate(sample, SourceLang.KO)
-                                    EngineKind.GOOGLE -> GoogleFreeEngine().translate(sample, SourceLang.KO)
+                                val (sampleText, sampleLang) = when (settings.sourceLang) {
+                                    SourceLang.ES -> "¡Hola! No te preocupes, te protegeré." to SourceLang.ES
+                                    SourceLang.JA -> "大丈夫、僕が守ってあげる。" to SourceLang.JA
+                                    SourceLang.ZH -> "没关系，我会保护你的。" to SourceLang.ZH
+                                    SourceLang.EN -> "It's okay. I will protect you." to SourceLang.EN
+                                    else -> "괜찮아. 내가 지켜줄게." to SourceLang.KO
                                 }
-                                "“괜찮아. 내가 지켜줄게.” → “" + out.first() + "”"
+                                val sample = listOf(sampleText)
+                                val out = when (settings.engine) {
+                                    EngineKind.LLM -> LlmEngine(draftSettings).translate(sample, sampleLang)
+                                    EngineKind.MLKIT -> MlKitEngine().translate(sample, sampleLang, settings.targetLang)
+                                    EngineKind.GOOGLE -> GoogleFreeEngine().translate(sample, sampleLang, settings.targetLang)
+                                }
+                                "“$sampleText” → “" + out.first() + "”"
                             } catch (e: Exception) {
                                 "⚠ " + (e.message ?: "failed")
                             } finally {
@@ -459,11 +894,108 @@ private fun EngineCard(settings: AppSettings, repo: SettingsRepository) {
                             }
                         }
                     }
-                ) { Text(if (testing) "Testing…" else "Test translation") }
+                ) { Text(if (testing) "Menerjemahkan…" else "Uji Terjemahan Contoh") }
             }
             testResult?.let {
                 Spacer(Modifier.height(6.dp))
                 Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineModelSection(settings: AppSettings) {
+    val scope = rememberCoroutineScope()
+    val srcCode = MlKitEngine.sourceCode(settings.sourceLang)
+    val tgtCode = MlKitEngine.targetCode(settings.targetLang)
+
+    var srcDownloaded by remember(settings.sourceLang) { mutableStateOf(false) }
+    var tgtDownloaded by remember(settings.targetLang) { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var downloadMsg by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(settings.sourceLang, settings.targetLang) {
+        srcDownloaded = MlKitEngine.isModelDownloaded(srcCode)
+        tgtDownloaded = MlKitEngine.isModelDownloaded(tgtCode)
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                "Status Model Offline (ML Kit)",
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Bahasa Asal ($srcCode):", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (srcDownloaded) "Siap Digunakan ✅" else "Belum Diunduh ❌",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (srcDownloaded) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Bahasa Tujuan ($tgtCode):", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (tgtDownloaded) "Siap Digunakan ✅" else "Belum Diunduh ❌",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (tgtDownloaded) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+            if (!srcDownloaded || !tgtDownloaded) {
+                Button(
+                    onClick = {
+                        downloading = true
+                        downloadMsg = null
+                        scope.launch {
+                            val sOk = if (!srcDownloaded) MlKitEngine.downloadModel(srcCode) else true
+                            val tOk = if (!tgtDownloaded) MlKitEngine.downloadModel(tgtCode) else true
+                            srcDownloaded = MlKitEngine.isModelDownloaded(srcCode)
+                            tgtDownloaded = MlKitEngine.isModelDownloaded(tgtCode)
+                            downloading = false
+                            downloadMsg = if (srcDownloaded && tgtDownloaded) {
+                                "✅ Model berhasil diunduh! Mode offline siap digunakan 100% tanpa internet."
+                            } else {
+                                "⚠ Gagal mengunduh model. Hubungkan internet lalu coba lagi."
+                            }
+                        }
+                    },
+                    enabled = !downloading,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (downloading) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Mengunduh model offline (~30 MB)...")
+                    } else {
+                        Text("📥 Unduh Model Offline Sekarang")
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "🎉 Model offline lengkap! Dapat menerjemahkan 100% tanpa internet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF2E7D32),
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            downloadMsg?.let { msg ->
+                Spacer(Modifier.height(6.dp))
+                Text(msg, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -477,9 +1009,9 @@ private fun ProviderPicker(settings: AppSettings, repo: SettingsRepository) {
         OutlinedButton(onClick = { open = true }) {
             Text(
                 "Provider: " + when (settings.provider) {
-                    LlmProvider.ANTHROPIC -> "Anthropic Claude (recommended)"
+                    LlmProvider.ANTHROPIC -> "Anthropic Claude"
                     LlmProvider.OPENAI -> "OpenAI"
-                    LlmProvider.GEMINI -> "Google Gemini"
+                    LlmProvider.GEMINI -> "Google Gemini (Gratis)"
                     LlmProvider.OPENROUTER -> "OpenRouter"
                     LlmProvider.CUSTOM -> "Custom endpoint"
                 }
@@ -491,11 +1023,11 @@ private fun ProviderPicker(settings: AppSettings, repo: SettingsRepository) {
                     text = {
                         Text(
                             when (p) {
-                                LlmProvider.ANTHROPIC -> "Anthropic Claude (recommended)"
+                                LlmProvider.ANTHROPIC -> "Anthropic Claude"
                                 LlmProvider.OPENAI -> "OpenAI"
-                                LlmProvider.GEMINI -> "Google Gemini (free tier)"
+                                LlmProvider.GEMINI -> "Google Gemini (Gratis tier)"
                                 LlmProvider.OPENROUTER -> "OpenRouter"
-                                LlmProvider.CUSTOM -> "Custom OpenAI-compatible endpoint"
+                                LlmProvider.CUSTOM -> "Custom endpoint"
                             }
                         )
                     },
@@ -537,69 +1069,6 @@ private fun LabeledSlider(
 }
 
 @Composable
-private fun ReadingCard(settings: AppSettings, repo: SettingsRepository) {
-    val scope = rememberCoroutineScope()
-    Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
-        Column(Modifier.padding(16.dp)) {
-            SectionTitle("Reading")
-            Spacer(Modifier.height(10.dp))
-            Text("Source language", style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chip("Auto", settings.sourceLang == SourceLang.AUTO) {
-                    scope.launch { repo.setSourceLang(SourceLang.AUTO) }
-                }
-                Chip("한국어", settings.sourceLang == SourceLang.KO) {
-                    scope.launch { repo.setSourceLang(SourceLang.KO) }
-                }
-                Chip("日本語", settings.sourceLang == SourceLang.JA) {
-                    scope.launch { repo.setSourceLang(SourceLang.JA) }
-                }
-                Chip("中文", settings.sourceLang == SourceLang.ZH) {
-                    scope.launch { repo.setSourceLang(SourceLang.ZH) }
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            Text("Mode", style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chip("Auto-live (hands-free)", settings.mode == CaptureMode.AUTO) {
-                    scope.launch { repo.setMode(CaptureMode.AUTO) }
-                }
-                Chip("Tap to translate", settings.mode == CaptureMode.MANUAL) {
-                    scope.launch { repo.setMode(CaptureMode.MANUAL) }
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-            LabeledSlider(
-                "Reaction time",
-                settings.stabilityMs.toFloat(),
-                200f..900f,
-                { "${it.toInt()} ms" },
-            ) { scope.launch { repo.setStabilityMs(it.toInt()) } }
-            LabeledSlider(
-                "Text size",
-                settings.textScale,
-                0.8f..1.5f,
-                { "${(it * 100).toInt()}%" },
-            ) { scope.launch { repo.setTextScale(it) } }
-            LabeledSlider(
-                "Ignore top of screen (browser bar)",
-                settings.ignoreTopPct,
-                0f..0.15f,
-                { "${(it * 100).toInt()}%" },
-            ) { scope.launch { repo.setIgnoreTopPct(it) } }
-        }
-    }
-}
-
-/**
- * Quiet update banner for a sideloaded app: one anonymous check per app open,
- * a card only when a newer release exists, and a button that opens the exact
- * APK asset for this install's signing history. The browser still owns the
- * download and Android still asks the user before installing it.
- */
-@Composable
 private fun UpdateCard(update: UpdateChecker.Update) {
     val uriHandler = LocalUriHandler.current
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
@@ -610,14 +1079,12 @@ private fun UpdateCard(update: UpdateChecker.Update) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Update available", fontWeight = FontWeight.SemiBold)
+                Text("Update tersedia", fontWeight = FontWeight.SemiBold)
                 Text(
                     when {
                         update.requiresReinstall ->
-                            "MangaLens ${update.version} is out, but this installation cannot join the official signing key in place. Record any API keys, download the APK, uninstall MangaLens, then install it. API keys will be cleared."
-                        update.legacyBridge ->
-                            "MangaLens ${update.version} is out. This one-time compatible APK keeps your data while moving 0.9.1 to the private release key."
-                        else -> "MangaLens ${update.version} is out."
+                            "MangaLens ${update.version} telah rilis. Unduh APK baru untuk memperbarui."
+                        else -> "MangaLens ${update.version} telah rilis."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -625,7 +1092,7 @@ private fun UpdateCard(update: UpdateChecker.Update) {
             }
             Spacer(Modifier.width(10.dp))
             Button(onClick = { uriHandler.openUri(update.url) }) {
-                Text(if (update.requiresReinstall) "Download" else "Download APK")
+                Text(if (update.requiresReinstall) "Unduh" else "Unduh APK")
             }
         }
     }
@@ -643,35 +1110,30 @@ private fun apiKeyLabel(provider: LlmProvider): String = when (provider) {
 
 private fun providerKeyHelp(provider: LlmProvider): ProviderKeyHelp = when (provider) {
     LlmProvider.ANTHROPIC -> ProviderKeyHelp(
-        "This key is saved only for Anthropic.",
-        "Create an Anthropic key →",
+        "Kunci ini disimpan hanya untuk Anthropic.",
+        "Buat kunci Anthropic →",
         "https://console.anthropic.com/settings/keys",
     )
     LlmProvider.OPENAI -> ProviderKeyHelp(
-        "This key is saved only for OpenAI.",
-        "Create an OpenAI key →",
+        "Kunci ini disimpan hanya untuk OpenAI.",
+        "Buat kunci OpenAI →",
         "https://platform.openai.com/api-keys",
     )
     LlmProvider.GEMINI -> ProviderKeyHelp(
-        "Gemini has a free tier (no card needed). This key is saved only for Gemini.",
-        "Create a Gemini key →",
+        "Gemini menyediakan kuota gratis (tanpa perlu kartu kredit). Kunci disimpan aman hanya untuk Gemini.",
+        "Dapatkan Gemini API Key Gratis →",
         "https://aistudio.google.com/apikey",
     )
     LlmProvider.OPENROUTER -> ProviderKeyHelp(
-        "Paste your OpenRouter key here. It stays separate from your Anthropic, OpenAI and Gemini keys.",
-        "Create or choose an OpenRouter key →",
+        "Kunci ini disimpan khusus untuk OpenRouter.",
+        "Buat kunci OpenRouter →",
         "https://openrouter.ai/settings/keys",
     )
     LlmProvider.CUSTOM -> ProviderKeyHelp(
-        "Optional bearer token for this custom endpoint. For safety, old shared keys are not migrated here; enter the token intended for this URL.",
+        "Bearer token opsional untuk endpoint custom.",
     )
 }
 
-/**
- * Fetches Google's live model list on demand and offers it as a menu — the
- * newest Flash first — so the picker shows models released long after this
- * build shipped. Manual typing in the field above always stays available.
- */
 @Composable
 private fun GeminiModelRow(apiKey: String, onPick: (String) -> Unit) {
     val scope = rememberCoroutineScope()
@@ -684,7 +1146,7 @@ private fun GeminiModelRow(apiKey: String, onPick: (String) -> Unit) {
             enabled = !loading,
             onClick = {
                 if (apiKey.isBlank()) {
-                    error = "Paste your API key first — the list comes from your account."
+                    error = "Tempel API Key terlebih dahulu."
                     return@OutlinedButton
                 }
                 error = null
@@ -697,15 +1159,15 @@ private fun GeminiModelRow(apiKey: String, onPick: (String) -> Unit) {
                     try {
                         models = ModelCatalog.gemini(apiKey)
                         open = models.isNotEmpty()
-                        if (models.isEmpty()) error = "Google returned no usable models."
+                        if (models.isEmpty()) error = "Google tidak mengembalikan model yang dapat digunakan."
                     } catch (e: Exception) {
-                        error = "Couldn't fetch models: " + (e.message ?: "network error")
+                        error = "Gagal mengambil daftar model: " + (e.message ?: "koneksi bermasalah")
                     } finally {
                         loading = false
                     }
                 }
             }
-        ) { Text(if (loading) "Fetching live model list…" else "Choose from Google's live model list ▾") }
+        ) { Text(if (loading) "Mengambil daftar model live…" else "Pilih dari daftar model Google live ▾") }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             models.forEach { m ->
                 DropdownMenuItem(
@@ -733,23 +1195,20 @@ private fun GeminiModelRow(apiKey: String, onPick: (String) -> Unit) {
 }
 
 @Composable
-private fun TipsCard() {
+private fun TipsCard(lang: AppLang) {
     Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.padding(16.dp)) {
-            SectionTitle("Good to know")
+            SectionTitle(AppStrings.sectionTips(lang))
             Spacer(Modifier.height(8.dp))
-            Text(
-                "• Brave private tabs block screen capture (they render black). Use a normal tab.\n" +
-                    "• Overlays never block touches — scroll right through them.\n" +
-                    "• Scrolling instantly hides overlays; stopping re-translates. That's the live loop.\n" +
-                    "• AI Pro shows a fast draft instantly, then the AI polish replaces it — slow internet never blocks reading.\n" +
-                    "• Text mode sends only bubble text; AI Vision sends the page image — only ever to the provider you chose.\n" +
-                    "• Names stay consistent: the AI keeps a glossary of characters and terms as you read.\n" +
-                    "• Reading raws you love? Support the official release when it exists.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                lineHeight = 20.sp
-            )
+            AppStrings.tipsContent(lang).forEach { (title, desc) ->
+                Text(
+                    "• $title: $desc",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 20.sp
+                )
+                Spacer(Modifier.height(6.dp))
+            }
         }
     }
 }

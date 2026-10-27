@@ -13,6 +13,8 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import app.mangalens.settings.AppLang
+import app.mangalens.ui.AppStrings
 import kotlin.math.abs
 
 /**
@@ -27,12 +29,14 @@ class OverlayController(private val context: Context, private val listener: List
         fun onTogglePause()
         fun onToggleMode()
         fun onPeek()
+        fun onCopyText()
         /** Forget this series' glossary, cast and story so far, and start fresh. */
         fun onNewSeries()
         fun onOpenSettings()
         fun onStopRequested()
         fun isPaused(): Boolean
         fun isAutoMode(): Boolean
+        fun appLang(): AppLang = AppLang.ID
     }
 
     private val wm = context.getSystemService(WindowManager::class.java)
@@ -45,6 +49,31 @@ class OverlayController(private val context: Context, private val listener: List
     private var controlsLp: WindowManager.LayoutParams? = null
     private var attached = false
     private val hidePill = Runnable { pill?.visibility = View.GONE }
+
+    @Volatile var autoDim: Boolean = true
+        set(value) {
+            field = value
+            if (!value) {
+                controls?.removeCallbacks(dimRunnable)
+                controls?.animate()?.alpha(1f)?.setDuration(200)?.start()
+            } else {
+                wakeControls()
+            }
+        }
+
+    private val dimRunnable = Runnable {
+        controls?.animate()?.alpha(0.35f)?.setDuration(400)?.start()
+    }
+
+    fun wakeControls() {
+        controls?.let { c ->
+            c.removeCallbacks(dimRunnable)
+            c.animate()?.alpha(1f)?.setDuration(150)?.start()
+            if (autoDim) {
+                c.postDelayed(dimRunnable, 3500)
+            }
+        }
+    }
 
     /**
      * Called on the main thread whenever the screen area the controls
@@ -78,11 +107,13 @@ class OverlayController(private val context: Context, private val listener: List
         wm.addView(bubbleView, bubbleLp)
         buildControls()
         attached = true
+        wakeControls()
     }
 
     fun detach() {
         if (!attached) return
         dismissMenu()
+        controls?.removeCallbacks(dimRunnable)
         runCatching { wm.removeView(bubbleView) }
         controls?.let { runCatching { wm.removeView(it) } }
         controls = null
@@ -113,6 +144,7 @@ class OverlayController(private val context: Context, private val listener: List
     }
 
     fun setStatus(text: String?, autoHideMs: Long = 0) {
+        wakeControls()
         val p = pill ?: return
         p.removeCallbacks(hidePill)
         if (text == null) {
@@ -125,11 +157,13 @@ class OverlayController(private val context: Context, private val listener: List
     }
 
     fun setPaused(paused: Boolean) {
+        wakeControls()
         button?.setPaused(paused)
     }
 
     /** Sweeps the busy ring on the button while a translation pass runs. */
     fun setBusy(busy: Boolean) {
+        wakeControls()
         button?.setBusy(busy)
     }
 
@@ -193,6 +227,7 @@ class OverlayController(private val context: Context, private val listener: List
             showMenu()
         }
         btn.setOnTouchListener { v, e ->
+            wakeControls()
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
@@ -258,15 +293,17 @@ class OverlayController(private val context: Context, private val listener: List
             })
         }
 
-        item("⚡  Translate now") { listener.onTranslateNow() }
-        item(if (listener.isPaused()) "▶  Resume live mode" else "⏸  Pause") { listener.onTogglePause() }
-        item(if (listener.isAutoMode()) "✋  Switch to tap-to-translate" else "🔄  Switch to auto-live") {
+        val lang = listener.appLang()
+        item(AppStrings.menuTranslateNow(lang)) { listener.onTranslateNow() }
+        item(if (listener.isPaused()) AppStrings.menuResume(lang) else AppStrings.menuPause(lang)) { listener.onTogglePause() }
+        item(if (listener.isAutoMode()) AppStrings.menuSwitchToManual(lang) else AppStrings.menuSwitchToAuto(lang)) {
             listener.onToggleMode()
         }
-        item("👁  Peek at original (4 s)") { listener.onPeek() }
-        item("📖  New series — forget names so far") { listener.onNewSeries() }
-        item("⚙  Settings") { listener.onOpenSettings() }
-        item("✕  Stop translating") { listener.onStopRequested() }
+        item(AppStrings.menuPeek(lang)) { listener.onPeek() }
+        item(AppStrings.menuCopyText(lang)) { listener.onCopyText() }
+        item(AppStrings.menuNewSeries(lang)) { listener.onNewSeries() }
+        item(AppStrings.menuSettings(lang)) { listener.onOpenSettings() }
+        item(AppStrings.menuStop(lang)) { listener.onStopRequested() }
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,

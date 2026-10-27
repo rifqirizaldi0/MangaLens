@@ -2,10 +2,12 @@ package app.mangalens.translate
 
 import app.mangalens.ocr.Script
 import app.mangalens.settings.SourceLang
+import app.mangalens.settings.TargetLang
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -13,16 +15,11 @@ import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
- * Zero-setup engine using Google Translate's public web endpoint.
- *
- * The whole page is sent as ONE newline-joined request so Google translates
- * with cross-line context. Responses are re-aligned to bubbles using Google's
- * own echo of the source text (not by counting newlines, which Google
- * restructures — especially for Korean); any bubble whose slot cannot be
- * verified makes the batch bail out to per-bubble requests, so a bad split
- * can never paint the wrong text on a bubble.
+ * Zero-setup engine using Google Translate's public web endpoint, with
+ * automatic MyMemory fallback when Google triggers anti-bot HTTP 429.
  */
 class GoogleFreeEngine : TranslationEngine {
 
@@ -33,74 +30,89 @@ class GoogleFreeEngine : TranslationEngine {
         .readTimeout(12, TimeUnit.SECONDS)
         .build()
 
-    override suspend fun translate(items: List<String>, lang: SourceLang): List<String> {
+    override suspend fun translate(items: List<String>, lang: SourceLang): List<String> =
+        translate(items, lang, TargetLang.EN)
+
+    suspend fun translate(
+        items: List<String>,
+        lang: SourceLang,
+        targetLang: TargetLang,
+    ): List<String> {
         if (items.isEmpty()) return emptyList()
-        if (items.size > 1) {
-            runCatching { translateBatch(items, lang) }.getOrNull()?.let { return it }
-        }
         return coroutineScope {
-            val semaphore = Semaphore(5)
-            items.map { text ->
-                async { semaphore.withPermit { translateOne(text, lang) } }
+            val semaphore = Semaphore(3)
+            items.mapIndexed { idx, text ->
+                async {
+                    if (text.isBlank()) ""
+                    else {
+                        if (idx > 0) delay((idx * 40L).coerceAtMost(300L))
+                        semaphore.withPermit { translateOne(text, lang, targetLang) }
+                    }
+                }
             }.map { it.await() }
         }
     }
 
-    /**
-     * Walks Google's (translated, original) segment pairs and assigns each
-     * translated segment to the bubble whose source text it consumed. Returns
-     * null whenever the mapping is not airtight.
-     */
-    private suspend fun translateBatch(items: List<String>, lang: SourceLang): List<String>? {
-        val rows = fetchRows(items.joinToString("\n"), lang)
-        if (rows.isEmpty()) return null
-
-        val boundaries = IntArray(items.size)
-        var accLen = 0
-        items.forEachIndexed { i, item ->
-            accLen += squash(item).length
-            boundaries[i] = accLen
+    private suspend fun translateOne(text: String, lang: SourceLang, targetLang: TargetLang): String {
+        return try {
+            val sb = StringBuilder()
+            for ((trans, _) in fetchRows(text, lang, targetLang)) sb.append(trans)
+            val res = sb.toString().trim()
+            if (res.isNotEmpty()) res else text
+        } catch (e: Exception) {
+            val sl = when {
+                lang == SourceLang.ES -> "es"
+                lang == SourceLang.EN -> "en"
+                lang == SourceLang.KO -> "ko"
+                lang == SourceLang.JA -> "ja"
+                lang == SourceLang.ZH -> "zh"
+                else -> "auto"
+            }
+            val tl = if (targetLang == TargetLang.ID) "id" else "en"
+            runCatching { fetchMyMemory(text, sl, tl) }.getOrNull() ?: throw e
         }
-
-        val builders = Array(items.size) { StringBuilder() }
-        var consumed = 0
-        var slot = 0
-        for ((trans, orig) in rows) {
-            if (slot >= items.size) break
-            builders[slot].append(trans)
-            consumed += squash(orig).length
-            while (slot < items.size && consumed >= boundaries[slot]) slot++
-        }
-        // Uncovered bubbles, or one Google segment spanning two bubbles
-        // (leaves a later builder empty) -> not trustworthy, retry per-item.
-        if (slot < items.size || consumed < boundaries.last()) return null
-        val out = builders.map { it.toString().replace(Regex("\\s+"), " ").trim() }
-        if (out.any { it.isEmpty() }) return null
-        // A slot still reading as CJK means Google echoed it untranslated.
-        if (out.any { Script.cjkCount(it) > it.length * 0.4f }) return null
-        return out
     }
 
-    private suspend fun translateOne(text: String, lang: SourceLang): String {
-        val sb = StringBuilder()
-        for ((trans, _) in fetchRows(text, lang)) sb.append(trans)
-        return sb.toString().trim().ifEmpty { text }
-    }
+    private suspend fun fetchMyMemory(text: String, sl: String, tl: String): String =
+        withContext(Dispatchers.IO) {
+            val encoded = java.net.URLEncoder.encode(text, "UTF-8")
+            val src = if (sl == "auto") "es" else sl
+            val url = "https://api.mymemory.translated.net/get?q=$encoded&langpair=$src|$tl"
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+            LlmHttp.await(client.newCall(request)).use { resp ->
+                if (!resp.isSuccessful) return@withContext text
+                val body = resp.body?.string() ?: return@withContext text
+                val json = JSONObject(body)
+                val responseData = json.optJSONObject("responseData")
+                val translated = responseData?.optString("translatedText", "") ?: ""
+                if (translated.isNotBlank()) translated else text
+            }
+        }
 
     /** One request; returns Google's (translated, original) segment pairs. */
-    private suspend fun fetchRows(text: String, lang: SourceLang): List<Pair<String, String>> =
+    private suspend fun fetchRows(text: String, lang: SourceLang, targetLang: TargetLang = TargetLang.EN): List<Pair<String, String>> =
         withContext(Dispatchers.IO) {
-            // The payload decides, not the setting: raws already translated
-            // once (Spanish, English) reach here carrying no CJK at all, and
-            // pinning them to a CJK source makes Google echo them back.
-            val sl = if (Script.cjkCount(text) == 0) "auto" else when (lang) {
-                SourceLang.KO -> "ko"
-                SourceLang.JA -> "ja"
-                SourceLang.ZH -> "zh-CN"
-                SourceLang.AUTO -> "auto"
+            val sl = when {
+                lang == SourceLang.ES -> "es"
+                lang == SourceLang.EN -> "en"
+                lang == SourceLang.KO -> "ko"
+                lang == SourceLang.JA -> "ja"
+                lang == SourceLang.ZH -> "zh-CN"
+                Script.hangulCount(text) > 0 -> "ko"
+                Script.kanaCount(text) > 0 -> "ja"
+                Script.hanCount(text) > 0 -> "zh-CN"
+                Script.cjkCount(text) == 0 -> "auto"
+                else -> "auto"
+            }
+            val tl = when (targetLang) {
+                TargetLang.ID -> "id"
+                else -> "en"
             }
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx" +
-                "&sl=" + sl + "&tl=en&dt=t&ie=UTF-8&oe=UTF-8"
+                "&sl=" + sl + "&tl=" + tl + "&dt=t&ie=UTF-8&oe=UTF-8"
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Tablet) AppleWebKit/537.36")

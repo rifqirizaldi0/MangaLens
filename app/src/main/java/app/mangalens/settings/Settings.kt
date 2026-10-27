@@ -20,8 +20,22 @@ import kotlinx.coroutines.flow.first
 
 enum class EngineKind { GOOGLE, LLM, MLKIT }
 enum class LlmProvider { ANTHROPIC, OPENAI, GEMINI, OPENROUTER, CUSTOM }
-enum class SourceLang { AUTO, KO, JA, ZH }
+enum class SourceLang { AUTO, KO, JA, ZH, EN, ES }
 enum class CaptureMode { AUTO, MANUAL }
+
+/**
+ * App interface display language.
+ * ID = Bahasa Indonesia (default)
+ * EN = English
+ */
+enum class AppLang { ID, EN }
+
+/**
+ * The language the user wants the translation rendered in.
+ * EN = English
+ * ID = Indonesian (Bahasa Indonesia)
+ */
+enum class TargetLang { EN, ID }
 
 /**
  * How AI Pro reads the page. AUTO sends the page image for scripts that break
@@ -41,6 +55,12 @@ enum class AiVisionMode { AUTO, ALWAYS, OFF }
  */
 enum class AiReasoning { FAST, BALANCED, THOROUGH }
 
+/** Appearance theme for translated speech bubbles. */
+enum class BubbleTheme { AUTO, WHITE, DARK, SEPIA }
+
+/** Lettering typography for dialogue. */
+enum class BubbleFont { COMIC, SANS, SERIF }
+
 data class AppSettings(
     val engine: EngineKind = EngineKind.GOOGLE,
     val provider: LlmProvider = LlmProvider.ANTHROPIC,
@@ -48,6 +68,10 @@ data class AppSettings(
     val model: String = "",
     val customUrl: String = "",
     val sourceLang: SourceLang = SourceLang.AUTO,
+    /** Language the translated text will be rendered in. */
+    val targetLang: TargetLang = TargetLang.ID,
+    /** App UI language. */
+    val appLang: AppLang = AppLang.ID,
     val mode: CaptureMode = CaptureMode.AUTO,
     val aiVision: AiVisionMode = AiVisionMode.AUTO,
     val aiReasoning: AiReasoning = AiReasoning.BALANCED,
@@ -64,6 +88,10 @@ data class AppSettings(
     val stabilityMs: Int = 350,
     val ignoreTopPct: Float = 0.03f,
     val ignoreBottomPct: Float = 0.02f,
+    val bubbleTheme: BubbleTheme = BubbleTheme.AUTO,
+    val bubbleFont: BubbleFont = BubbleFont.COMIC,
+    val bubbleShadow: Boolean = true,
+    val autoDimFloating: Boolean = true,
 ) {
     fun effectiveModel(): String = if (model.isNotBlank()) model else when (provider) {
         LlmProvider.ANTHROPIC -> "claude-sonnet-5"
@@ -94,6 +122,8 @@ private object Keys {
     val LEGACY_MODEL = stringPreferencesKey("model")
     val CUSTOM_URL = stringPreferencesKey("custom_url")
     val SOURCE_LANG = stringPreferencesKey("source_lang")
+    val TARGET_LANG = stringPreferencesKey("target_lang")
+    val APP_LANG = stringPreferencesKey("app_lang")
     val MODE = stringPreferencesKey("mode")
     val AI_VISION = stringPreferencesKey("ai_vision")
     val AI_REASONING = stringPreferencesKey("ai_reasoning")
@@ -104,6 +134,10 @@ private object Keys {
     val STABILITY_MS = intPreferencesKey("stability_ms")
     val IGNORE_TOP = floatPreferencesKey("ignore_top")
     val IGNORE_BOTTOM = floatPreferencesKey("ignore_bottom")
+    val BUBBLE_THEME = stringPreferencesKey("bubble_theme")
+    val BUBBLE_FONT = stringPreferencesKey("bubble_font")
+    val BUBBLE_SHADOW = booleanPreferencesKey("bubble_shadow")
+    val AUTO_DIM_FLOATING = booleanPreferencesKey("auto_dim_floating")
 
     private val API_KEY_ANTHROPIC = stringPreferencesKey("api_key_anthropic")
     private val API_KEY_OPENAI = stringPreferencesKey("api_key_openai")
@@ -226,6 +260,8 @@ internal fun settingsFromPreferences(p: Preferences, credentials: Preferences = 
         model = p[Keys.model(provider)] ?: d.model,
         customUrl = p[Keys.CUSTOM_URL] ?: d.customUrl,
         sourceLang = enumOr(p[Keys.SOURCE_LANG], d.sourceLang),
+        targetLang = enumOr(p[Keys.TARGET_LANG], d.targetLang),
+        appLang = enumOr(p[Keys.APP_LANG], d.appLang),
         mode = enumOr(p[Keys.MODE], d.mode),
         aiVision = enumOr(p[Keys.AI_VISION], d.aiVision),
         aiReasoning = enumOr(p[Keys.AI_REASONING], d.aiReasoning),
@@ -236,6 +272,10 @@ internal fun settingsFromPreferences(p: Preferences, credentials: Preferences = 
         stabilityMs = p[Keys.STABILITY_MS] ?: d.stabilityMs,
         ignoreTopPct = p[Keys.IGNORE_TOP] ?: d.ignoreTopPct,
         ignoreBottomPct = p[Keys.IGNORE_BOTTOM] ?: d.ignoreBottomPct,
+        bubbleTheme = enumOr(p[Keys.BUBBLE_THEME], d.bubbleTheme),
+        bubbleFont = enumOr(p[Keys.BUBBLE_FONT], d.bubbleFont),
+        bubbleShadow = p[Keys.BUBBLE_SHADOW] ?: d.bubbleShadow,
+        autoDimFloating = p[Keys.AUTO_DIM_FLOATING] ?: d.autoDimFloating,
     )
 }
 
@@ -257,6 +297,8 @@ class SettingsRepository(private val context: Context) {
         context.settingsStore.edit { it[Keys.model(provider)] = v }
     suspend fun setCustomUrl(v: String) = context.settingsStore.edit { it[Keys.CUSTOM_URL] = v }
     suspend fun setSourceLang(v: SourceLang) = context.settingsStore.edit { it[Keys.SOURCE_LANG] = v.name }
+    suspend fun setTargetLang(v: TargetLang) = context.settingsStore.edit { it[Keys.TARGET_LANG] = v.name }
+    suspend fun setAppLang(v: AppLang) = context.settingsStore.edit { it[Keys.APP_LANG] = v.name }
     suspend fun setMode(v: CaptureMode) = context.settingsStore.edit { it[Keys.MODE] = v.name }
     suspend fun setAiVision(v: AiVisionMode) = context.settingsStore.edit { it[Keys.AI_VISION] = v.name }
     suspend fun setAiReasoning(v: AiReasoning) = context.settingsStore.edit { it[Keys.AI_REASONING] = v.name }
@@ -267,4 +309,8 @@ class SettingsRepository(private val context: Context) {
     suspend fun setStabilityMs(v: Int) = context.settingsStore.edit { it[Keys.STABILITY_MS] = v }
     suspend fun setIgnoreTopPct(v: Float) = context.settingsStore.edit { it[Keys.IGNORE_TOP] = v }
     suspend fun setIgnoreBottomPct(v: Float) = context.settingsStore.edit { it[Keys.IGNORE_BOTTOM] = v }
+    suspend fun setBubbleTheme(v: BubbleTheme) = context.settingsStore.edit { it[Keys.BUBBLE_THEME] = v.name }
+    suspend fun setBubbleFont(v: BubbleFont) = context.settingsStore.edit { it[Keys.BUBBLE_FONT] = v.name }
+    suspend fun setBubbleShadow(v: Boolean) = context.settingsStore.edit { it[Keys.BUBBLE_SHADOW] = v }
+    suspend fun setAutoDimFloating(v: Boolean) = context.settingsStore.edit { it[Keys.AUTO_DIM_FLOATING] = v }
 }
